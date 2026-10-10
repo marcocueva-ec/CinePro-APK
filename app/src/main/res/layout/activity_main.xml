@@ -5,29 +5,29 @@
     android:background="#0D1014"
     android:keepScreenOn="true">
 
-    <!-- 1. VISOR DE CAMARA OPEN GATE / 4K -->
+    <!-- 1. VISOR DE CAMARA EN LANDSCAPE -->
     <TextureView
         android:id="@+id/viewfinder"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:layout_gravity="center" />
 
-    <!-- 2. CAPA DE GUIAS, NIVEL, CEBRA Y LUT PREVIEW -->
+    <!-- 2. CAPA DE GUIAS, NIVEL Y LUT PREVIEW -->
     <com.cinepro.camera.ui.CineOverlaysView
         android:id="@+id/cineOverlays"
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
 
-    <!-- 3. BARRA SUPERIOR (Pildoras de Codec/OpenGate, FPS, Timecode, LUT, Almacenamiento y Bateria) -->
+    <!-- 3. BARRA SUPERIOR -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="horizontal"
         android:gravity="center_vertical"
-        android:paddingHorizontal="18dp"
+        android:paddingStart="18dp"
+        android:paddingEnd="124dp"
         android:paddingTop="12dp">
 
-        <!-- Selector OpenGate / ProRes / Log -->
         <TextView
             android:id="@+id/btnCodecMode"
             android:layout_width="wrap_content"
@@ -40,7 +40,6 @@
             android:textStyle="bold"
             android:textSize="12sp" />
 
-        <!-- Selector FPS -->
         <TextView
             android:id="@+id/btnFps"
             android:layout_width="wrap_content"
@@ -55,7 +54,6 @@
 
         <View android:layout_width="0dp" android:layout_height="1dp" android:layout_weight="1" />
 
-        <!-- Timecode Central + Boton LUT debajo -->
         <LinearLayout
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
@@ -91,7 +89,6 @@
 
         <View android:layout_width="0dp" android:layout_height="1dp" android:layout_weight="1" />
 
-        <!-- Almacenamiento Restante -->
         <TextView
             android:id="@+id/txtStorage"
             android:layout_width="wrap_content"
@@ -99,16 +96,15 @@
             android:background="@drawable/bg_glass_pill"
             android:gravity="center"
             android:paddingHorizontal="14dp"
-            android:text="150 Mbps • Libre"
+            android:text="DCIM/Camera"
             android:textColor="#B0BEC5"
-            android:textSize="12sp" />
+            android:textSize="11sp" />
 
-        <!-- Bateria -->
         <TextView
             android:id="@+id/txtBattery"
             android:layout_width="wrap_content"
             android:layout_height="36dp"
-            android:layout_marginStart="10dp"
+            android:layout_marginStart="8dp"
             android:background="@drawable/bg_glass_pill"
             android:gravity="center"
             android:paddingHorizontal="12dp"
@@ -118,7 +114,7 @@
             android:textSize="12sp" />
     </LinearLayout>
 
-    <!-- 4. BARRA DE HERRAMIENTAS IZQUIERDA + VUMETRO + HISTOGRAMA RGB -->
+    <!-- 4. BARRA IZQUIERDA + HISTOGRAMA RGB -->
     <LinearLayout
         android:layout_width="96dp"
         android:layout_height="match_parent"
@@ -178,7 +174,6 @@
                 android:textSize="11sp"
                 android:textStyle="bold" />
 
-            <!-- Medidor de Audio Estereo L/R -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="0dp"
@@ -208,7 +203,6 @@
             </LinearLayout>
         </LinearLayout>
 
-        <!-- Histograma RGB en tiempo real (Esquina inferior izquierda) -->
         <com.cinepro.camera.ui.RgbHistogramView
             android:id="@+id/rgbHistogram"
             android:layout_width="82dp"
@@ -217,10 +211,77 @@
             android:background="@drawable/bg_glass_card" />
     </LinearLayout>
 
-    <!-- 5. PANEL DE CONTROL INFERIOR: 5 TARJETAS CON DIALES EN ARCO -->
+    <!-- 5. NUEVO: MENU EMERGENTE ACCIONABLE AL TOCAR ISO, SHUTTER, WB, FOCUS O IRIS -->
+    <LinearLayout
+        android:id="@+id/popupParameterMenu"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom"
+        android:layout_marginStart="108dp"
+        android:layout_marginEnd="124dp"
+        android:layout_marginBottom="168dp"
+        android:background="@drawable/bg_glass_card"
+        android:orientation="vertical"
+        android:padding="12dp"
+        android:visibility="gone">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <TextView
+                android:id="@+id/txtPopupTitle"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="SELECCIONAR ISO"
+                android:textColor="#38E8FF"
+                android:textSize="13sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/btnClosePopup"
+                android:layout_width="wrap_content"
+                android:layout_height="28dp"
+                android:background="@drawable/bg_glass_pill"
+                android:gravity="center"
+                android:paddingHorizontal="12dp"
+                android:text="CERRAR ✕"
+                android:textColor="#FF5252"
+                android:textSize="11sp"
+                android:textStyle="bold" />
+        </LinearLayout>
+
+        <!-- Botones rapidos accionables (Presets) -->
+        <HorizontalScrollView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:scrollbars="none">
+
+            <LinearLayout
+                android:id="@+id/presetButtonsContainer"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal" />
+        </HorizontalScrollView>
+
+        <!-- Barra deslizadora de precision -->
+        <SeekBar
+            android:id="@+id/popupSeekBar"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:max="100"
+            android:progress="50" />
+    </LinearLayout>
+
+    <!-- 6. PANEL DE CONTROL INFERIOR: 5 TARJETAS ACCIONABLES AL TOQUE -->
     <LinearLayout
         android:layout_width="match_parent"
-        android:layout_height="152dp"
+        android:layout_height="150dp"
         android:layout_gravity="bottom"
         android:layout_marginStart="104dp"
         android:layout_marginEnd="120dp"
@@ -230,11 +291,14 @@
 
         <!-- CARD 1: [FOCUS] -->
         <LinearLayout
+            android:id="@+id/cardFocus"
             android:layout_width="0dp"
             android:layout_height="match_parent"
             android:layout_weight="1"
             android:layout_marginHorizontal="4dp"
             android:background="@drawable/bg_glass_card"
+            android:clickable="true"
+            android:focusable="true"
             android:gravity="center_horizontal"
             android:orientation="vertical"
             android:paddingTop="8dp">
@@ -242,7 +306,7 @@
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="[FOCUS]"
+                android:text="[FOCUS] ▲"
                 android:textColor="#B0BEC5"
                 android:textSize="11sp" />
 
@@ -264,11 +328,14 @@
 
         <!-- CARD 2: [ISO] -->
         <LinearLayout
+            android:id="@+id/cardIso"
             android:layout_width="0dp"
             android:layout_height="match_parent"
             android:layout_weight="1"
             android:layout_marginHorizontal="4dp"
             android:background="@drawable/bg_glass_card"
+            android:clickable="true"
+            android:focusable="true"
             android:gravity="center_horizontal"
             android:orientation="vertical"
             android:paddingTop="8dp">
@@ -276,7 +343,7 @@
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="[ISO]"
+                android:text="[ISO] ▲"
                 android:textColor="#B0BEC5"
                 android:textSize="11sp" />
 
@@ -298,11 +365,14 @@
 
         <!-- CARD 3: [SHUTTER] -->
         <LinearLayout
+            android:id="@+id/cardShutter"
             android:layout_width="0dp"
             android:layout_height="match_parent"
             android:layout_weight="1"
             android:layout_marginHorizontal="4dp"
             android:background="@drawable/bg_glass_card"
+            android:clickable="true"
+            android:focusable="true"
             android:gravity="center_horizontal"
             android:orientation="vertical"
             android:paddingTop="8dp">
@@ -310,7 +380,7 @@
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="[SHUTTER]"
+                android:text="[SHUTTER] ▲"
                 android:textColor="#B0BEC5"
                 android:textSize="11sp" />
 
@@ -332,11 +402,14 @@
 
         <!-- CARD 4: [WB] -->
         <LinearLayout
+            android:id="@+id/cardWb"
             android:layout_width="0dp"
             android:layout_height="match_parent"
             android:layout_weight="1"
             android:layout_marginHorizontal="4dp"
             android:background="@drawable/bg_glass_card"
+            android:clickable="true"
+            android:focusable="true"
             android:gravity="center_horizontal"
             android:orientation="vertical"
             android:paddingTop="8dp">
@@ -344,7 +417,7 @@
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="[WB]"
+                android:text="[WB] ▲"
                 android:textColor="#B0BEC5"
                 android:textSize="11sp" />
 
@@ -371,13 +444,16 @@
                 android:layout_height="match_parent" />
         </LinearLayout>
 
-        <!-- CARD 5: [IRIS / EV] -->
+        <!-- CARD 5: [IRIS] -->
         <LinearLayout
+            android:id="@+id/cardIris"
             android:layout_width="0dp"
             android:layout_height="match_parent"
             android:layout_weight="1"
             android:layout_marginHorizontal="4dp"
             android:background="@drawable/bg_glass_card"
+            android:clickable="true"
+            android:focusable="true"
             android:gravity="center_horizontal"
             android:orientation="vertical"
             android:paddingTop="8dp">
@@ -385,7 +461,7 @@
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="[IRIS]"
+                android:text="[IRIS] ▲"
                 android:textColor="#B0BEC5"
                 android:textSize="11sp" />
 
@@ -394,7 +470,7 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="2dp"
-                android:text="f/1.8"
+                android:text="0.0 EV"
                 android:textColor="#38E8FF"
                 android:textSize="18sp"
                 android:textStyle="bold" />
@@ -406,7 +482,7 @@
         </LinearLayout>
     </LinearLayout>
 
-    <!-- 6. BARRA LATERAL DERECHA: DIAL DE ZOOM CURVO + BOTON REC + LENTES -->
+    <!-- 7. BARRA LATERAL DERECHA: ZOOM + REC + GALERIA + LOG -->
     <LinearLayout
         android:layout_width="116dp"
         android:layout_height="match_parent"
@@ -414,26 +490,23 @@
         android:gravity="center_vertical"
         android:orientation="horizontal">
 
-        <!-- Dial de Zoom Curvo -->
         <com.cinepro.camera.ui.CurvedZoomView
             android:id="@+id/curvedZoom"
             android:layout_width="38dp"
             android:layout_height="220dp" />
 
-        <!-- Columna Derecha con REC y Controles -->
         <LinearLayout
             android:layout_width="78dp"
             android:layout_height="match_parent"
             android:background="#CC12161A"
             android:gravity="center"
             android:orientation="vertical"
-            android:paddingVertical="16dp">
+            android:paddingVertical="14dp">
 
-            <!-- Selector de Lente / Sensor -->
             <TextView
                 android:id="@+id/btnLensSwitch"
-                android:layout_width="44dp"
-                android:layout_height="44dp"
+                android:layout_width="48dp"
+                android:layout_height="40dp"
                 android:background="@drawable/bg_glass_card"
                 android:gravity="center"
                 android:text="1.0x"
@@ -443,7 +516,6 @@
 
             <View android:layout_width="1dp" android:layout_height="0dp" android:layout_weight="1" />
 
-            <!-- BOTON CIRCULAR REC GIGANTE -->
             <TextView
                 android:id="@+id/btnRecord"
                 android:layout_width="64dp"
@@ -457,11 +529,23 @@
 
             <View android:layout_width="1dp" android:layout_height="0dp" android:layout_weight="1" />
 
-            <!-- Boton Perfil Log / Nitidez Off -->
+            <!-- Boton para abrir la Galeria de Fotos directamente -->
+            <TextView
+                android:id="@+id/btnOpenGallery"
+                android:layout_width="48dp"
+                android:layout_height="38dp"
+                android:layout_marginBottom="8dp"
+                android:background="@drawable/bg_glass_card"
+                android:gravity="center"
+                android:text="▶ GAL"
+                android:textColor="#E0E6ED"
+                android:textSize="11sp"
+                android:textStyle="bold" />
+
             <TextView
                 android:id="@+id/btnLogProfile"
-                android:layout_width="44dp"
-                android:layout_height="44dp"
+                android:layout_width="48dp"
+                android:layout_height="38dp"
                 android:background="@drawable/bg_glass_card"
                 android:gravity="center"
                 android:text="LOG"
