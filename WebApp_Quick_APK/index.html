@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>CinePro Camera HUD - Open Gate & Log</title>
+<style>
+  :root {
+    --cyan: #38E8FF;
+    --crimson: #FF2A3A;
+    --glass: rgba(24, 30, 36, 0.78);
+    --glass-border: rgba(255, 255, 255, 0.14);
+    --text-main: #EBF4FA;
+    --text-muted: #9BAAB8;
+  }
+  * { box-sizing: border-box; user-select: none; -webkit-user-select: none; margin: 0; padding: 0; }
+  body, html {
+    width: 100vw; height: 100vh; overflow: hidden;
+    background: #090C10; font-family: 'Segoe UI', Roboto, system-ui, sans-serif;
+    color: var(--text-main);
+  }
+  #camera-container {
+    position: relative; width: 100vw; height: 100vh;
+    display: flex; align-items: center; justify-content: center;
+    background: radial-gradient(circle at center, #1b2430 0%, #090c10 100%);
+  }
+  video#viewfinder {
+    width: 100%; height: 100%; object-fit: cover;
+    transition: all 0.25s ease;
+  }
+  video#viewfinder.opengate {
+    width: 75%; height: 100%; object-fit: cover;
+    border-left: 1px solid rgba(56, 232, 255, 0.35);
+    border-right: 1px solid rgba(56, 232, 255, 0.35);
+  }
+  /* Grid & Level Overlays */
+  #grid-overlay {
+    position: absolute; inset: 0; pointer-events: none;
+    background-image:
+      linear-gradient(to right, rgba(255,255,255,0.15) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(255,255,255,0.15) 1px, transparent 1px);
+    background-size: 33.333% 33.333%;
+  }
+  #level-overlay {
+    position: absolute; top: 50%; left: 50%; width: 140px; height: 2px;
+    transform: translate(-50%, -50%); background: rgba(56, 232, 255, 0.6);
+    pointer-events: none;
+  }
+  /* Top Bar */
+  .top-bar {
+    position: absolute; top: 12px; left: 16px; right: 104px;
+    display: flex; align-items: flex-start; justify-content: space-between;
+    z-index: 20;
+  }
+  .pill {
+    background: var(--glass); backdrop-filter: blur(12px);
+    border: 1px solid var(--glass-border); border-radius: 20px;
+    padding: 7px 15px; font-size: 12px; font-weight: 600;
+    display: inline-flex; align-items: center; gap: 8px; cursor: pointer;
+    box-shadow: 0 4px 14px rgba(0,0,0,0.4);
+  }
+  .pill.cyan { color: var(--cyan); border-color: rgba(56, 232, 255, 0.45); }
+  .center-hud {
+    display: flex; flex-direction: column; align-items: center; gap: 6px;
+  }
+  .timecode-box {
+    background: rgba(18, 22, 28, 0.85); backdrop-filter: blur(12px);
+    border: 1px solid var(--glass-border); border-radius: 12px;
+    padding: 5px 20px; font-family: monospace; font-size: 23px;
+    font-weight: 700; letter-spacing: 1.5px; color: #fff;
+  }
+  .timecode-box.recording { color: var(--crimson); border-color: var(--crimson); }
+  /* Left Toolbar */
+  .left-bar {
+    position: absolute; left: 16px; top: 64px; bottom: 16px;
+    width: 82px; display: flex; flex-direction: column; align-items: center;
+    gap: 10px; z-index: 20;
+  }
+  .tool-strip {
+    background: var(--glass); backdrop-filter: blur(12px);
+    border: 1px solid var(--glass-border); border-radius: 16px;
+    width: 52px; flex: 1; display: flex; flex-direction: column;
+    align-items: center; padding: 10px 0; justify-content: space-between;
+  }
+  .tool-btn {
+    width: 38px; height: 32px; border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 11px; font-weight: 700; color: var(--text-muted);
+    cursor: pointer; transition: 0.15s;
+  }
+  .tool-btn.active { color: var(--cyan); background: rgba(56,232,255,0.14); }
+  .vu-meters {
+    display: flex; gap: 5px; height: 95px; align-items: flex-end; padding: 4px 0;
+  }
+  .vu-bar {
+    width: 7px; height: 100%; background: rgba(255,255,255,0.1);
+    border-radius: 4px; overflow: hidden; display: flex; align-items: flex-end;
+  }
+  .vu-fill {
+    width: 100%; height: 70%;
+    background: linear-gradient(to top, #00E676 0%, #00E676 65%, #FFEA00 85%, #FF1744 100%);
+    transition: height 0.08s ease;
+  }
+  #histogram-canvas {
+    width: 82px; height: 52px; background: var(--glass);
+    border: 1px solid var(--glass-border); border-radius: 10px;
+  }
+  /* Bottom 5 Interactive Control Cards */
+  .bottom-panel {
+    position: absolute; bottom: 12px; left: 110px; right: 115px;
+    height: 152px; display: grid; grid-template-columns: repeat(5, 1fr);
+    gap: 8px; z-index: 20;
+  }
+  .control-card {
+    background: var(--glass); backdrop-filter: blur(14px);
+    border: 1px solid var(--glass-border); border-radius: 16px;
+    display: flex; flex-direction: column; align-items: center;
+    padding-top: 8px; position: relative; overflow: hidden;
+    box-shadow: 0 8px 20px rgba(0,0,0,0.45);
+  }
+  .card-title { font-size: 11px; color: var(--text-muted); font-weight: 600; letter-spacing: 0.5px; }
+  .card-value { font-size: 19px; color: var(--cyan); font-weight: 700; margin-top: 2px; }
+  .wb-bar {
+    width: 72%; height: 4px; border-radius: 3px; margin-top: 3px;
+    background: linear-gradient(90deg, #FFA726, #FFF9C4, #42A5F5);
+  }
+  .dial-canvas { width: 100%; flex: 1; cursor: ew-resize; touch-action: none; }
+  /* Right Sidebar */
+  .right-sidebar {
+    position: absolute; right: 0; top: 0; bottom: 0; width: 92px;
+    background: rgba(14, 18, 22, 0.86); backdrop-filter: blur(14px);
+    border-left: 1px solid var(--glass-border);
+    display: flex; flex-direction: column; align-items: center;
+    justify-content: space-between; padding: 18px 0; z-index: 20;
+  }
+  .rec-btn {
+    width: 66px; height: 66px; border-radius: 50%;
+    border: 3px solid var(--crimson); padding: 6px;
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer; box-shadow: 0 0 22px rgba(255, 42, 58, 0.45);
+  }
+  .rec-inner {
+    width: 100%; height: 100%; border-radius: 50%;
+    background: radial-gradient(circle, #ff3b4b 0%, #b81220 100%);
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 800; font-size: 13px; color: #fff; transition: 0.2s;
+  }
+  .rec-btn.recording .rec-inner { border-radius: 10px; transform: scale(0.72); }
+  .side-icon {
+    width: 44px; height: 44px; border-radius: 12px;
+    background: var(--glass); border: 1px solid var(--glass-border);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 12px; font-weight: 700; color: var(--text-main); cursor: pointer;
+  }
+</style>
+</head>
+<body>
+<div id="camera-container">
+  <video id="viewfinder" class="opengate" autoplay playsinline muted></video>
+  <div id="grid-overlay"></div>
+  <div id="level-overlay"></div>
+
+  <!-- Barra Superior -->
+  <div class="top-bar">
+    <div style="display:flex; gap:8px;">
+      <div class="pill cyan" id="btn-codec">OPEN GATE 4:3 LOG</div>
+      <div class="pill" id="btn-fps">24 fps</div>
+    </div>
+
+    <div class="center-hud">
+      <div class="timecode-box" id="timecode">00:00:00:00</div>
+      <div class="pill" id="btn-lut" style="padding:3px 12px; font-size:10px;">LUT REC709: OFF</div>
+    </div>
+
+    <div style="display:flex; gap:8px;">
+      <div class="pill">150 Mbps HEVC</div>
+      <div class="pill" style="color:#00E676;">98%</div>
+    </div>
+  </div>
+
+  <!-- Barra Izquierda + Histograma -->
+  <div class="left-bar">
+    <div class="tool-strip">
+      <div class="tool-btn" id="btn-log" style="color:#00E676;">LOG</div>
+      <div class="tool-btn active" id="btn-grid">GRID</div>
+      <div class="tool-btn active" id="btn-lvl">LVL</div>
+      <div class="vu-meters">
+        <div class="vu-bar"><div class="vu-fill" id="vu-l"></div></div>
+        <div class="vu-bar"><div class="vu-fill" id="vu-r"></div></div>
+      </div>
+    </div>
+    <canvas id="histogram-canvas" width="164" height="104"></canvas>
+  </div>
+
+  <!-- 5 Tarjetas Inferiores con Diales en Arco -->
+  <div class="bottom-panel">
+    <div class="control-card">
+      <div class="card-title">[FOCUS]</div>
+      <div class="card-value" id="val-focus">AF-C</div>
+      <canvas class="dial-canvas" data-param="focus" data-prog="0.0"></canvas>
+    </div>
+    <div class="control-card">
+      <div class="card-title">[ISO]</div>
+      <div class="card-value" id="val-iso">400</div>
+      <canvas class="dial-canvas" data-param="iso" data-prog="0.38"></canvas>
+    </div>
+    <div class="control-card">
+      <div class="card-title">[SHUTTER]</div>
+      <div class="card-value" id="val-shutter">1/48s</div>
+      <canvas class="dial-canvas" data-param="shutter" data-prog="0.22"></canvas>
+    </div>
+    <div class="control-card">
+      <div class="card-title">[WB]</div>
+      <div class="card-value" id="val-wb">5600K</div>
+      <div class="wb-bar"></div>
+      <canvas class="dial-canvas" data-param="wb" data-prog="0.45"></canvas>
+    </div>
+    <div class="control-card">
+      <div class="card-title">[IRIS]</div>
+      <div class="card-value" id="val-iris">f/1.8</div>
+      <canvas class="dial-canvas" data-param="iris" data-prog="0.30"></canvas>
+    </div>
+  </div>
+
+  <!-- Barra Lateral Derecha -->
+  <div class="right-sidebar">
+    <div class="side-icon" id="btn-lens">1.0x</div>
+    <div class="rec-btn" id="btn-rec"><div class="rec-inner">REC</div></div>
+    <div class="side-icon" id="btn-fullscreen">FULL</div>
+  </div>
+</div>
+
+<script>
+  const video = document.getElementById('viewfinder');
+  let isLog = true, isLut = false, isOpenGate = true, isRec = false;
+  let isoSteps = [50, 100, 160, 200, 320, 400, 640, 800, 1250, 1600, 3200, 6400];
+  let shutterSteps = [24, 30, 48, 50, 60, 100, 120, 250, 500, 1000, 2000];
+  let irisSteps = ['1.4', '1.8', '2.0', '2.8', '4.0', '5.6', '8.0'];
+  let currentIsoIdx = 5, currentShutterIdx = 2, currentWb = 5600;
+
+  // Iniciar camara real en maxima resolucion disponible
+  async function startCamera() {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'environment', width: { ideal: 4000 }, height: { ideal: 3000 } },
+        audio: false
+      });
+      video.srcObject = stream;
+    } catch (e) {
+      console.log('Modo simulador visual activo');
+    }
+    updateVideoFilter();
+  }
+  startCamera();
+
+  function updateVideoFilter() {
+    const expFactor = (isoSteps[currentIsoIdx] / 400) * (48 / shutterSteps[currentShutterIdx]);
+    const brightness = Math.min(Math.max(0.65 + Math.log2(expFactor + 0.2) * 0.18, 0.4), 1.6);
+    const contrast = isLog ? (isLut ? 1.12 : 0.72) : 1.05;
+    const saturate = isLog ? (isLut ? 1.18 : 0.62) : 1.05;
+    const sepia = (currentWb - 5600) / 15000;
+    video.style.filter = `brightness(${brightness}) contrast(${contrast}) saturate(${saturate}) sepia(${Math.max(0, sepia)})`;
+  }
+
+  // Dibujar e interactuar con los 5 diales en arco
+  document.querySelectorAll('.dial-canvas').forEach(canvas => {
+    const ctx = canvas.getContext('2d');
+    canvas.width = 160; canvas.height = 95;
+    let prog = parseFloat(canvas.dataset.prog);
+    const param = canvas.dataset.param;
+
+    function draw() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      const cx = canvas.width / 2, cy = canvas.height * 0.94, r = 64;
+      const startA = 195 * Math.PI / 180, sweepA = 150 * Math.PI / 180;
+      for (let i = 0; i <= 26; i++) {
+        const f = i / 26;
+        const a = startA + f * sweepA;
+        ctx.beginPath();
+        ctx.moveTo(cx + Math.cos(a) * (r * 0.72), cy + Math.sin(a) * (r * 0.72));
+        ctx.lineTo(cx + Math.cos(a) * (r * 0.92), cy + Math.sin(a) * (r * 0.92));
+        ctx.lineWidth = 2.2;
+        if (param === 'iso' && f > 0.75) {
+          ctx.strokeStyle = f <= prog ? '#FF3B30' : 'rgba(255,59,48,0.35)';
+        } else {
+          ctx.strokeStyle = f <= prog ? '#38E8FF' : 'rgba(155,170,184,0.3)';
+        }
+        ctx.stroke();
+      }
+      // Knob central
+      ctx.beginPath();
+      ctx.arc(cx, cy, r * 0.56, 0, Math.PI * 2);
+      ctx.fillStyle = '#20262D'; ctx.fill();
+      ctx.lineWidth = 2; ctx.strokeStyle = '#3A4450'; ctx.stroke();
+
+      // Aguja indicadora
+      const curA = startA + prog * sweepA;
+      ctx.beginPath();
+      ctx.moveTo(cx + Math.cos(curA) * 12, cy + Math.sin(curA) * 12);
+      ctx.lineTo(cx + Math.cos(curA) * 30, cy + Math.sin(curA) * 30);
+      ctx.strokeStyle = '#FFFFFF'; ctx.lineWidth = 3; ctx.stroke();
+    }
+    draw();
+
+    let dragging = false, lastX = 0;
+    const onMove = (clientX) => {
+      if (!dragging) return;
+      const dx = clientX - lastX; lastX = clientX;
+      prog = Math.min(1, Math.max(0, prog + dx / 110));
+      draw();
+      if (param === 'focus') {
+        document.getElementById('val-focus').textContent = prog < 0.08 ? 'AF-C' : (0.3 + prog * 4.5).toFixed(2) + 'm';
+      } else if (param === 'iso') {
+        currentIsoIdx = Math.round(prog * (isoSteps.length - 1));
+        document.getElementById('val-iso').textContent = isoSteps[currentIsoIdx];
+      } else if (param === 'shutter') {
+        currentShutterIdx = Math.round(prog * (shutterSteps.length - 1));
+        document.getElementById('val-shutter').textContent = '1/' + shutterSteps[currentShutterIdx] + 's';
+      } else if (param === 'wb') {
+        currentWb = Math.round((2500 + prog * 7500) / 100) * 100;
+        document.getElementById('val-wb').textContent = currentWb + 'K';
+      } else if (param === 'iris') {
+        const idx = Math.round(prog * (irisSteps.length - 1));
+        document.getElementById('val-iris').textContent = 'f/' + irisSteps[idx];
+      }
+      updateVideoFilter();
+    };
+    canvas.addEventListener('pointerdown', e => { dragging = true; lastX = e.clientX; canvas.setPointerCapture(e.pointerId); });
+    canvas.addEventListener('pointermove', e => onMove(e.clientX));
+    canvas.addEventListener('pointerup', () => dragging = false);
+  });
+
+  // Botones superiores y laterales
+  document.getElementById('btn-codec').onclick = function() {
+    isOpenGate = !isOpenGate;
+    video.classList.toggle('opengate', isOpenGate);
+    this.textContent = isOpenGate ? 'OPEN GATE 4:3 LOG' : '4K UHD 16:9 LOG';
+  };
+  document.getElementById('btn-lut').onclick = function() {
+    isLut = !isLut;
+    this.textContent = isLut ? 'LUT REC709: ON' : 'LUT REC709: OFF';
+    this.classList.toggle('cyan', isLut);
+    updateVideoFilter();
+  };
+  document.getElementById('btn-log').onclick = function() {
+    isLog = !isLog;
+    this.style.color = isLog ? '#00E676' : '#9BAAB8';
+    updateVideoFilter();
+  };
+  document.getElementById('btn-rec').onclick = function() {
+    isRec = !isRec;
+    this.classList.toggle('recording', isRec);
+    document.getElementById('timecode').classList.toggle('recording', isRec);
+  };
+  document.getElementById('btn-fullscreen').onclick = () => {
+    if (!document.fullscreenElement) document.documentElement.requestFullscreen();
+    else document.exitFullscreen();
+  };
+
+  // Animacion de Histograma RGB y Vumetros
+  const hCanvas = document.getElementById('histogram-canvas');
+  const hCtx = hCanvas.getContext('2d');
+  let t = 0;
+  setInterval(() => {
+    t += 0.12;
+    document.getElementById('vu-l').style.height = (45 + Math.sin(t * 2.3) * 25 + Math.random() * 15) + '%';
+    document.getElementById('vu-r').style.height = (42 + Math.cos(t * 1.9) * 25 + Math.random() * 15) + '%';
+
+    hCtx.clearRect(0, 0, hCanvas.width, hCanvas.height);
+    const channels = [
+      { color: 'rgba(255, 23, 68, 0.55)', center: 0.35 },
+      { color: 'rgba(0, 230, 118, 0.55)', center: 0.52 },
+      { color: 'rgba(41, 121, 255, 0.55)', center: 0.68 }
+    ];
+    channels.forEach(ch => {
+      hCtx.beginPath(); hCtx.moveTo(0, hCanvas.height);
+      for (let x = 0; x <= hCanvas.width; x += 6) {
+        const nx = x / hCanvas.width;
+        const d = (nx - ch.center) * 4;
+        const y = hCanvas.height - (Math.exp(-d * d) * 0.78 + Math.sin(nx * 14 + t) * 0.06) * hCanvas.height;
+        hCtx.lineTo(x, y);
+      }
+      hCtx.lineTo(hCanvas.width, hCanvas.height);
+      hCtx.fillStyle = ch.color; hCtx.fill();
+    });
+  }, 80);
+</script>
+</body>
+</html>
