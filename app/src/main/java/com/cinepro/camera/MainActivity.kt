@@ -7,28 +7,20 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
-import android.graphics.Color
-import android.graphics.Matrix
-import android.graphics.Rect
-import android.graphics.RectF
-import android.graphics.SurfaceTexture
+import android.graphics.*
 import android.hardware.camera2.*
 import android.hardware.camera2.params.RggbChannelVector
 import android.hardware.camera2.params.TonemapCurve
 import android.hardware.display.DisplayManager
+import android.media.Image
+import android.media.ImageReader
 import android.media.MediaRecorder
-import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.*
 import android.provider.MediaStore
 import android.util.Range
 import android.util.Size
-import android.view.Gravity
-import android.view.Surface
-import android.view.TextureView
-import android.view.View
-import android.view.WindowInsets
-import android.view.WindowInsetsController
+import android.view.*
 import android.widget.LinearLayout
 import android.widget.SeekBar
 import android.widget.TextView
@@ -37,6 +29,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.cinepro.camera.databinding.ActivityMainBinding
+import kotlin.math.abs
 import kotlin.math.ln
 import kotlin.math.pow
 import kotlin.math.roundToInt
@@ -47,9 +40,18 @@ class MainActivity : AppCompatActivity() {
     private lateinit var cameraManager: CameraManager
     private lateinit var displayManager: DisplayManager
     private var cameraDevice: CameraDevice? = null
+    private var currentCharacteristics: CameraCharacteristics? = null
     private var captureSession: CameraCaptureSession? = null
     private var previewRequestBuilder: CaptureRequest.Builder? = null
     private var mediaRecorder: MediaRecorder? = null
+
+    // Lector para Fotografia RAW (.DNG) y JPEG en Maxima Resolucion del Sensor
+    private var rawImageReader: ImageReader? = null
+    private var jpegImageReader: ImageReader? = null
+    private var isRawSupportedOnCurrentLens: Boolean = false
+    private val rawLock = Any()
+    private var pendingRawResult: TotalCaptureResult? = null
+    private var pendingRawImage: Image? = null
 
     private var backgroundThread: HandlerThread? = null
     private var backgroundHandler: Handler? = null
@@ -58,9 +60,8 @@ class MainActivity : AppCompatActivity() {
     private var currentCameraId: String = "0"
     private var availableCameraIds: List<String> = emptyList()
     private var currentCameraIndex = 0
-    private var sensorOrientation: Int = 90
 
-    private var openGateMode: Boolean = false // Inicia en 16:9 Landscape completo (toca el boton para Open Gate 4:3)
+    private var openGateMode: Boolean = true // Open Gate 4:3 sin recorte activo por defecto
     private var logModeEnabled: Boolean = true
     private var selectedFps: Int = 24
     private var isRecording: Boolean = false
@@ -74,7 +75,15 @@ class MainActivity : AppCompatActivity() {
     private var sensorActiveArray: Rect = Rect(0, 0, 4000, 3000)
     private var maxZoom: Float = 8.0f
 
-    // Estado Manual / Auto de cada parametro
+    // Progreso guardado (0.0 a 1.0) para cada tarjeta
+    private var focusProg: Float = 0f
+    private var isoProg: Float = 0.38f
+    private var shutterProg: Float = 0.20f
+    private var wbProg: Float = 0.42f
+    private var irisProg: Float = 0.50f
+    private var peakingProg: Float = 0f // 0 = OFF, >0 = Intensidad de Focus Peaking
+
+    // Estado Manual / Auto
     private var autoIsoAndShutter: Boolean = false
     private var autoWb: Boolean = false
     private var currentIso: Int = 400
@@ -85,7 +94,7 @@ class MainActivity : AppCompatActivity() {
     private var currentZoomRatio: Float = 1.0f
 
     private var selectedVideoSize: Size = Size(3840, 2160)
-    private var currentVideoUri: Uri? = null
+    private var lastSavedMediaUri: Uri? = null
     private var currentParcelFd: ParcelFileDescriptor? = null
 
     private val isoSteps = listOf(50, 100, 160, 200, 320, 400, 640, 800, 1250, 1600, 2500, 3200, 6400)
@@ -94,8 +103,9 @@ class MainActivity : AppCompatActivity() {
     private val fpsOptions = listOf(24, 30, 60)
 
     private var activePopupParam: String? = null
+    private var isAnalyzingPeaking: Boolean = false
+    private var lastPeakingTimestamp: Long = 0L
 
-    // Listener para detectar cuando giras el telefono de un lado horizontal al otro (180 grados)
     private val displayListener = object : DisplayManager.DisplayListener {
         override fun onDisplayAdded(displayId: Int) {}
         override fun onDisplayRemoved(displayId: Int) {}
@@ -106,7 +116,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // Timer de Timecode
     private var recStartTimeMs = 0L
     private val uiHandler = Handler(Looper.getMainLooper())
     private val timecodeRunnable = object : Runnable {
@@ -148,52 +157,54 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /**
-     * Configura las 5 tarjetas inferiores para que al tocarlas abran su menu interactivo
-     * con botones rapidos (ISO, Shutter, WB, Focus, Iris/EV) y barra deslizadora.
-     */
     private fun setupActionableCardsAndPopup() {
         binding.cardFocus.setOnClickListener { togglePopupMenu("FOCUS") }
         binding.cardIso.setOnClickListener { togglePopupMenu("ISO") }
         binding.cardShutter.setOnClickListener { togglePopupMenu("SHUTTER") }
         binding.cardWb.setOnClickListener { togglePopupMenu("WB") }
         binding.cardIris.setOnClickListener { togglePopupMenu("IRIS") }
+        binding.btnPeaking.setOnClickListener { togglePopupMenu("PEAKING") }
+
+        // Tocar el visor cierra la rueda emergente para despejar la pantalla
+        binding.viewfinder.setOnClickListener {
+            if (binding.popupParameterMenu.visibility == View.VISIBLE) {
+                activePopupParam = null
+                binding.popupParameterMenu.visibility = View.GONE
+            }
+        }
 
         binding.btnClosePopup.setOnClickListener {
             activePopupParam = null
             binding.popupParameterMenu.visibility = View.GONE
         }
 
+        // Conectar la Rueda Unica Emergente (popupArcDial) al parametro que este abierto
+        binding.popupArcDial.onValueChanged = { norm ->
+            binding.popupSeekBar.progress = (norm * 100).roundToInt()
+            applyProgressToActiveParameter(norm)
+        }
+
         binding.popupSeekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                 if (!fromUser) return
                 val norm = progress / 100f
-                when (activePopupParam) {
-                    "FOCUS" -> {
-                        binding.dialFocus.progress = norm
-                        updateFocusFromProgress(norm)
-                    }
-                    "ISO" -> {
-                        binding.dialIso.progress = norm
-                        updateIsoFromProgress(norm)
-                    }
-                    "SHUTTER" -> {
-                        binding.dialShutter.progress = norm
-                        updateShutterFromProgress(norm)
-                    }
-                    "WB" -> {
-                        binding.dialWb.progress = norm
-                        updateWbFromProgress(norm)
-                    }
-                    "IRIS" -> {
-                        binding.dialIris.progress = norm
-                        updateIrisFromProgress(norm)
-                    }
-                }
+                binding.popupArcDial.progress = norm
+                applyProgressToActiveParameter(norm)
             }
             override fun onStartTrackingTouch(seekBar: SeekBar?) {}
             override fun onStopTrackingTouch(seekBar: SeekBar?) {}
         })
+    }
+
+    private fun applyProgressToActiveParameter(norm: Float) {
+        when (activePopupParam) {
+            "FOCUS" -> updateFocusFromProgress(norm)
+            "ISO" -> updateIsoFromProgress(norm)
+            "SHUTTER" -> updateShutterFromProgress(norm)
+            "WB" -> updateWbFromProgress(norm)
+            "IRIS" -> updateIrisFromProgress(norm)
+            "PEAKING" -> updatePeakingFromProgress(norm)
+        }
     }
 
     private fun togglePopupMenu(param: String) {
@@ -208,24 +219,22 @@ class MainActivity : AppCompatActivity() {
 
         when (param) {
             "FOCUS" -> {
-                binding.txtPopupTitle.text = "ENFOQUE MANUAL / AF-C"
-                binding.popupSeekBar.progress = (binding.dialFocus.progress * 100).roundToInt()
-                addPresetButton("AF-C (Auto)") {
-                    binding.dialFocus.progress = 0f
-                    binding.popupSeekBar.progress = 0
-                    updateFocusFromProgress(0f)
-                }
-                listOf("Macro 0.1m" to 0.95f, "0.25m" to 0.7f, "0.5m" to 0.45f, "1.0m" to 0.25f, "Infinito ∞" to 0.10f).forEach { (label, prog) ->
-                    addPresetButton(label) {
-                        binding.dialFocus.progress = prog
-                        binding.popupSeekBar.progress = (prog * 100).roundToInt()
-                        updateFocusFromProgress(prog)
-                    }
+                binding.txtPopupTitle.text = "RUEDA DE ENFOQUE MANUAL / AF-C"
+                binding.popupArcDial.accentMode = 0
+                binding.popupArcDial.progress = focusProg
+                binding.popupSeekBar.progress = (focusProg * 100).roundToInt()
+
+                addPresetButton("AF-C (Auto)") { setPopupAndParam(0f) }
+                listOf("Macro 0.1m" to 0.95f, "0.25m" to 0.70f, "0.5m" to 0.45f, "1.0m" to 0.25f, "Infinito ∞" to 0.10f).forEach { (label, prog) ->
+                    addPresetButton(label) { setPopupAndParam(prog) }
                 }
             }
             "ISO" -> {
-                binding.txtPopupTitle.text = "SENSIBILIDAD ISO DEL SENSOR"
-                binding.popupSeekBar.progress = (binding.dialIso.progress * 100).roundToInt()
+                binding.txtPopupTitle.text = "RUEDA DE SENSIBILIDAD ISO"
+                binding.popupArcDial.accentMode = 1
+                binding.popupArcDial.progress = isoProg
+                binding.popupSeekBar.progress = (isoProg * 100).roundToInt()
+
                 addPresetButton("AUTO AE") {
                     autoIsoAndShutter = true
                     binding.valIso.text = "AUTO"
@@ -235,16 +244,16 @@ class MainActivity : AppCompatActivity() {
                 isoSteps.forEachIndexed { index, isoVal ->
                     addPresetButton("ISO $isoVal") {
                         autoIsoAndShutter = false
-                        val prog = index.toFloat() / (isoSteps.size - 1)
-                        binding.dialIso.progress = prog
-                        binding.popupSeekBar.progress = (prog * 100).roundToInt()
-                        updateIsoFromProgress(prog)
+                        setPopupAndParam(index.toFloat() / (isoSteps.size - 1))
                     }
                 }
             }
             "SHUTTER" -> {
-                binding.txtPopupTitle.text = "VELOCIDAD DE OBTURACIÓN (SHUTTER SPEED)"
-                binding.popupSeekBar.progress = (binding.dialShutter.progress * 100).roundToInt()
+                binding.txtPopupTitle.text = "RUEDA DE SHUTTER SPEED (OBTURACIÓN)"
+                binding.popupArcDial.accentMode = 0
+                binding.popupArcDial.progress = shutterProg
+                binding.popupSeekBar.progress = (shutterProg * 100).roundToInt()
+
                 addPresetButton("AUTO AE") {
                     autoIsoAndShutter = true
                     binding.valShutter.text = "AUTO"
@@ -254,16 +263,16 @@ class MainActivity : AppCompatActivity() {
                 shutterStepsDenom.forEachIndexed { index, denom ->
                     addPresetButton("1/${denom}s") {
                         autoIsoAndShutter = false
-                        val prog = index.toFloat() / (shutterStepsDenom.size - 1)
-                        binding.dialShutter.progress = prog
-                        binding.popupSeekBar.progress = (prog * 100).roundToInt()
-                        updateShutterFromProgress(prog)
+                        setPopupAndParam(index.toFloat() / (shutterStepsDenom.size - 1))
                     }
                 }
             }
             "WB" -> {
-                binding.txtPopupTitle.text = "BALANCE DE BLANCOS (KELVIN)"
-                binding.popupSeekBar.progress = (binding.dialWb.progress * 100).roundToInt()
+                binding.txtPopupTitle.text = "RUEDA DE BALANCE DE BLANCOS (KELVIN)"
+                binding.popupArcDial.accentMode = 2
+                binding.popupArcDial.progress = wbProg
+                binding.popupSeekBar.progress = (wbProg * 100).roundToInt()
+
                 addPresetButton("AWB (Auto)") {
                     autoWb = true
                     binding.valWb.text = "AWB"
@@ -272,42 +281,57 @@ class MainActivity : AppCompatActivity() {
                 wbSteps.forEach { kelvin ->
                     addPresetButton("${kelvin}K") {
                         autoWb = false
-                        val prog = ((kelvin - 2500f) / 7500f).coerceIn(0f, 1f)
-                        binding.dialWb.progress = prog
-                        binding.popupSeekBar.progress = (prog * 100).roundToInt()
-                        updateWbFromProgress(prog)
+                        setPopupAndParam(((kelvin - 2500f) / 7500f).coerceIn(0f, 1f))
                     }
                 }
             }
             "IRIS" -> {
-                binding.txtPopupTitle.text = "COMPENSACIÓN DE EXPOSICIÓN (EV / IRIS)"
-                binding.popupSeekBar.progress = (binding.dialIris.progress * 100).roundToInt()
+                binding.txtPopupTitle.text = "RUEDA DE EXPOSICIÓN (EV / IRIS)"
+                binding.popupArcDial.accentMode = 0
+                binding.popupArcDial.progress = irisProg
+                binding.popupSeekBar.progress = (irisProg * 100).roundToInt()
+
                 listOf(-2.0f, -1.0f, -0.5f, 0.0f, 0.5f, 1.0f, 2.0f).forEach { ev ->
                     val label = if (ev >= 0) "+${ev} EV" else "${ev} EV"
                     addPresetButton(label) {
-                        val prog = ((ev + 2.0f) / 4.0f).coerceIn(0f, 1f)
-                        binding.dialIris.progress = prog
-                        binding.popupSeekBar.progress = (prog * 100).roundToInt()
-                        updateIrisFromProgress(prog)
+                        setPopupAndParam(((ev + 2.0f) / 4.0f).coerceIn(0f, 1f))
                     }
                 }
             }
+            "PEAKING" -> {
+                binding.txtPopupTitle.text = "INTENSIDAD DE FOCUS PEAKING (BORDES ENFOCADOS)"
+                binding.popupArcDial.accentMode = 1
+                binding.popupArcDial.progress = peakingProg
+                binding.popupSeekBar.progress = (peakingProg * 100).roundToInt()
+
+                addPresetButton("APAGADO (OFF)") { setPopupAndParam(0f) }
+                addPresetButton("SUAVE (25%)") { setPopupAndParam(0.25f) }
+                addPresetButton("MEDIO (55%)") { setPopupAndParam(0.55f) }
+                addPresetButton("ALTO (80%)") { setPopupAndParam(0.80f) }
+                addPresetButton("MÁXIMO (100%)") { setPopupAndParam(1.0f) }
+            }
         }
+    }
+
+    private fun setPopupAndParam(prog: Float) {
+        binding.popupArcDial.progress = prog
+        binding.popupSeekBar.progress = (prog * 100).roundToInt()
+        applyProgressToActiveParameter(prog)
     }
 
     private fun addPresetButton(title: String, onClick: () -> Unit) {
         val btn = TextView(this).apply {
             text = title
             setTextColor(Color.parseColor("#E0F7FA"))
-            textSize = 12f
+            textSize = 11f
             gravity = Gravity.CENTER
             setBackgroundResource(R.drawable.bg_glass_pill)
-            setPadding(28, 14, 28, 14)
+            setPadding(26, 12, 26, 12)
             val params = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
             )
-            params.marginEnd = 14
+            params.marginEnd = 12
             layoutParams = params
             setOnClickListener { onClick() }
         }
@@ -315,6 +339,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateFocusFromProgress(progress: Float) {
+        focusProg = progress
         if (progress < 0.08f) {
             currentFocusDist = 0f
             binding.valFocus.text = "AF-C"
@@ -327,25 +352,28 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateIsoFromProgress(progress: Float) {
+        isoProg = progress
         autoIsoAndShutter = false
         val idx = (progress * (isoSteps.size - 1)).roundToInt()
         currentIso = isoSteps[idx].coerceIn(isoRange.lower, isoRange.upper)
         binding.valIso.text = currentIso.toString()
-        binding.rgbHistogram.updateFromExposure(progress, binding.dialShutter.progress)
+        binding.rgbHistogram.updateFromExposure(progress, shutterProg)
         applyParametersToSession()
     }
 
     private fun updateShutterFromProgress(progress: Float) {
+        shutterProg = progress
         autoIsoAndShutter = false
         val idx = (progress * (shutterStepsDenom.size - 1)).roundToInt()
         val denom = shutterStepsDenom[idx]
         currentShutterNs = (1_000_000_000L / denom).coerceIn(exposureTimeRange.lower, exposureTimeRange.upper)
         binding.valShutter.text = "1/${denom}s"
-        binding.rgbHistogram.updateFromExposure(binding.dialIso.progress, progress)
+        binding.rgbHistogram.updateFromExposure(isoProg, progress)
         applyParametersToSession()
     }
 
     private fun updateWbFromProgress(progress: Float) {
+        wbProg = progress
         autoWb = false
         currentKelvin = (2500 + (progress * 7500).roundToInt() / 100 * 100)
         binding.valWb.text = "${currentKelvin}K"
@@ -353,46 +381,29 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateIrisFromProgress(progress: Float) {
+        irisProg = progress
         currentEvIndex = (aeCompRange.lower + progress * (aeCompRange.upper - aeCompRange.lower)).roundToInt()
         val evVal = currentEvIndex * aeCompStep
         binding.valIris.text = String.format("%+.1f EV", evVal)
         applyParametersToSession()
     }
 
+    private fun updatePeakingFromProgress(progress: Float) {
+        peakingProg = progress
+        val level = (progress * 100).roundToInt()
+        binding.cineOverlays.peakingSensitivity = level
+        if (level == 0) {
+            binding.btnPeaking.text = "PEAK"
+            binding.btnPeaking.setTextColor(0xFFB0BEC5.toInt())
+            binding.cineOverlays.peakingBitmap = null
+        } else {
+            binding.btnPeaking.text = "PK ${level}%"
+            binding.btnPeaking.setTextColor(0xFF00E676.toInt())
+        }
+        binding.cineOverlays.invalidate()
+    }
+
     private fun setupUIControls() {
-        binding.dialIso.accentMode = 1
-        binding.dialWb.accentMode = 2
-
-        binding.dialFocus.progress = 0f
-        binding.dialFocus.onValueChanged = { prog ->
-            updateFocusFromProgress(prog)
-            if (activePopupParam == "FOCUS") binding.popupSeekBar.progress = (prog * 100).roundToInt()
-        }
-
-        binding.dialIso.progress = 0.35f
-        binding.dialIso.onValueChanged = { prog ->
-            updateIsoFromProgress(prog)
-            if (activePopupParam == "ISO") binding.popupSeekBar.progress = (prog * 100).roundToInt()
-        }
-
-        binding.dialShutter.progress = 0.2f
-        binding.dialShutter.onValueChanged = { prog ->
-            updateShutterFromProgress(prog)
-            if (activePopupParam == "SHUTTER") binding.popupSeekBar.progress = (prog * 100).roundToInt()
-        }
-
-        binding.dialWb.progress = 0.42f
-        binding.dialWb.onValueChanged = { prog ->
-            updateWbFromProgress(prog)
-            if (activePopupParam == "WB") binding.popupSeekBar.progress = (prog * 100).roundToInt()
-        }
-
-        binding.dialIris.progress = 0.5f
-        binding.dialIris.onValueChanged = { prog ->
-            updateIrisFromProgress(prog)
-            if (activePopupParam == "IRIS") binding.popupSeekBar.progress = (prog * 100).roundToInt()
-        }
-
         binding.curvedZoom.onZoomChanged = { progress ->
             currentZoomRatio = 1.0f + progress * (maxZoom - 1.0f).coerceAtMost(5.0f)
             binding.btnLensSwitch.text = String.format("%.1fx", currentZoomRatio)
@@ -440,35 +451,55 @@ class MainActivity : AppCompatActivity() {
             reopenCamera()
         }
 
-        // Boton para abrir directamente el ultimo video en la Galeria de Fotos
-        binding.btnOpenGallery.setOnClickListener {
-            try {
-                if (currentVideoUri != null) {
-                    val intent = Intent(Intent.ACTION_VIEW).apply {
-                        setDataAndType(currentVideoUri, "video/mp4")
-                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                    }
-                    startActivity(intent)
-                } else {
-                    val intent = Intent(Intent.ACTION_VIEW, MediaStore.Video.Media.EXTERNAL_CONTENT_URI)
-                    startActivity(intent)
-                }
-            } catch (e: Exception) {
-                Toast.makeText(this, "Abriendo Galeria...", Toast.LENGTH_SHORT).show()
-            }
-        }
-
+        // Boton GRID: Alterna entre Regla de Tercios -> Tercios + Cruz -> Apagado
         binding.btnGrid.setOnClickListener {
-            binding.cineOverlays.showGrid = !binding.cineOverlays.showGrid
-            binding.btnGrid.setTextColor(if (binding.cineOverlays.showGrid) 0xFF38E8FF.toInt() else 0xFFB0BEC5.toInt())
+            binding.cineOverlays.gridMode = (binding.cineOverlays.gridMode + 1) % 3
+            when (binding.cineOverlays.gridMode) {
+                0 -> {
+                    binding.btnGrid.text = "GRID"
+                    binding.btnGrid.setTextColor(0xFFB0BEC5.toInt())
+                }
+                1 -> {
+                    binding.btnGrid.text = "3x3"
+                    binding.btnGrid.setTextColor(0xFF38E8FF.toInt())
+                }
+                2 -> {
+                    binding.btnGrid.text = "3x3+"
+                    binding.btnGrid.setTextColor(0xFF00E676.toInt())
+                }
+            }
             binding.cineOverlays.invalidate()
         }
+
         binding.btnLevel.setOnClickListener {
             binding.cineOverlays.showLevel = !binding.cineOverlays.showLevel
             binding.btnLevel.setTextColor(if (binding.cineOverlays.showLevel) 0xFF38E8FF.toInt() else 0xFFB0BEC5.toInt())
             binding.cineOverlays.invalidate()
         }
 
+        // Boton GALERIA
+        binding.btnOpenGallery.setOnClickListener {
+            try {
+                if (lastSavedMediaUri != null) {
+                    val intent = Intent(Intent.ACTION_VIEW).apply {
+                        setDataAndType(lastSavedMediaUri, "*/*")
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
+                    startActivity(intent)
+                } else {
+                    startActivity(Intent(Intent.ACTION_VIEW, MediaStore.Images.Media.EXTERNAL_CONTENT_URI))
+                }
+            } catch (e: Exception) {
+                Toast.makeText(this, "Abriendo Galeria...", Toast.LENGTH_SHORT).show()
+            }
+        }
+
+        // NUEVO: Boton Fotografia RAW (.DNG) en Maxima Resolucion
+        binding.btnCaptureRaw.setOnClickListener {
+            captureRawOrMaxPhoto()
+        }
+
+        // Boton REC Video
         binding.btnRecord.setOnClickListener {
             if (isRecording) stopRecordingVideo() else startRecordingVideo()
         }
@@ -487,7 +518,68 @@ class MainActivity : AppCompatActivity() {
                     configureTransform(width, height)
                 }
                 override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean = true
-                override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {}
+                override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {
+                    processLiveFocusPeakingFrame()
+                }
+            }
+        }
+    }
+
+    /**
+     * Calcula Focus Peaking en tiempo real analizando el gradiente de bordes (Sobel/Laplaciano)
+     * con sensibilidad configurable por el usuario.
+     */
+    private fun processLiveFocusPeakingFrame() {
+        val sensitivity = binding.cineOverlays.peakingSensitivity
+        if (sensitivity <= 0 || isAnalyzingPeaking) return
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastPeakingTimestamp < 55L) return
+
+        val smallBmp = binding.viewfinder.getBitmap(220, 130) ?: return
+        isAnalyzingPeaking = true
+        lastPeakingTimestamp = now
+
+        backgroundHandler?.post {
+            try {
+                val w = smallBmp.width
+                val h = smallBmp.height
+                val pixels = IntArray(w * h)
+                val outPixels = IntArray(w * h)
+                smallBmp.getPixels(pixels, 0, w, 0, 0, w, h)
+                smallBmp.recycle()
+
+                // Umbral inversamente proporcional a la sensibilidad elegida (mas sensibilidad = umbral mas bajo)
+                val threshold = (135 - (sensitivity * 1.05f)).toInt().coerceIn(18, 125)
+
+                for (y in 1 until h - 1) {
+                    val rowOffset = y * w
+                    for (x in 1 until w - 1) {
+                        val idx = rowOffset + x
+                        val c = pixels[idx]
+                        val lumaC = ((c shr 16 and 0xFF) * 2 + (c shr 8 and 0xFF) * 5 + (c and 0xFF)) shr 3
+
+                        val r = pixels[idx + 1]
+                        val lumaR = ((r shr 16 and 0xFF) * 2 + (r shr 8 and 0xFF) * 5 + (r and 0xFF)) shr 3
+
+                        val b = pixels[idx + w]
+                        val lumaB = ((b shr 16 and 0xFF) * 2 + (b shr 8 and 0xFF) * 5 + (b and 0xFF)) shr 3
+
+                        val grad = abs(lumaC - lumaR) + abs(lumaC - lumaB)
+                        if (grad > threshold) {
+                            // Color Verde Neon / Cian de alto contraste para los bordes en foco
+                            outPixels[idx] = if (grad > threshold + 35) 0xFFFF1744.toInt() else 0xFF00E676.toInt()
+                        }
+                    }
+                }
+
+                val peakBmp = Bitmap.createBitmap(outPixels, w, h, Bitmap.Config.ARGB_8888)
+                runOnUiThread {
+                    binding.cineOverlays.peakingBitmap = peakBmp
+                    binding.cineOverlays.invalidate()
+                    isAnalyzingPeaking = false
+                }
+            } catch (e: Exception) {
+                isAnalyzingPeaking = false
             }
         }
     }
@@ -508,7 +600,7 @@ class MainActivity : AppCompatActivity() {
     private fun openCamera(width: Int, height: Int) {
         try {
             val chars = cameraManager.getCameraCharacteristics(currentCameraId)
-            sensorOrientation = chars.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
+            currentCharacteristics = chars
             isoRange = chars.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE) ?: Range(100, 3200)
             exposureTimeRange = chars.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE) ?: Range(1_000_000L, 100_000_000L)
             aeCompRange = chars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE) ?: Range(-6, 6)
@@ -517,11 +609,43 @@ class MainActivity : AppCompatActivity() {
             sensorActiveArray = chars.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE) ?: Rect(0, 0, 4000, 3000)
             maxZoom = chars.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM) ?: 8.0f
 
+            val capabilities = chars.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: intArrayOf()
             val map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
-            val videoSizes = map?.getOutputSizes(MediaRecorder::class.java) ?: arrayOf(Size(1920, 1080))
 
+            // Configurar ImageReader para Fotografia RAW (.DNG) en Maxima Resolucion Nativa
+            val rawSizes = map?.getOutputSizes(ImageFormat.RAW_SENSOR)
+            isRawSupportedOnCurrentLens = capabilities.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_RAW) && !rawSizes.isNullOrEmpty()
+
+            rawImageReader?.close()
+            jpegImageReader?.close()
+
+            if (isRawSupportedOnCurrentLens && rawSizes != null) {
+                val maxRawSize = rawSizes.maxByOrNull { it.width * it.height } ?: rawSizes[0]
+                rawImageReader = ImageReader.newInstance(maxRawSize.width, maxRawSize.height, ImageFormat.RAW_SENSOR, 2).apply {
+                    setOnImageAvailableListener({ reader ->
+                        synchronized(rawLock) {
+                            pendingRawImage?.close()
+                            pendingRawImage = reader.acquireNextImage()
+                            tryWriteDngToGallery()
+                        }
+                    }, backgroundHandler)
+                }
+            }
+
+            // Configurar tambien JPEG en Maxima Resolucion del Sensor (por si el lente secundario no tiene DNG)
+            val jpegSizes = map?.getOutputSizes(ImageFormat.JPEG) ?: arrayOf(Size(4000, 3000))
+            val maxJpegSize = jpegSizes.maxByOrNull { it.width * it.height } ?: Size(3840, 2160)
+            jpegImageReader = ImageReader.newInstance(maxJpegSize.width, maxJpegSize.height, ImageFormat.JPEG, 2).apply {
+                setOnImageAvailableListener({ reader ->
+                    val img = reader.acquireNextImage() ?: return@setOnImageAvailableListener
+                    saveJpegToGallery(img)
+                }, backgroundHandler)
+            }
+
+            // Seleccionar tamaño de video (Open Gate 4:3 Completo o 4K 16:9)
+            val videoSizes = map?.getOutputSizes(MediaRecorder::class.java) ?: arrayOf(Size(1920, 1080))
             selectedVideoSize = chooseOptimalVideoSize(videoSizes, openGateMode)
-            val modeLabel = if (openGateMode) "OPEN GATE ${selectedVideoSize.width}x${selectedVideoSize.height}" else "4K LANDSCAPE ${selectedVideoSize.width}x${selectedVideoSize.height}"
+            val modeLabel = if (openGateMode) "OPEN GATE ${selectedVideoSize.width}x${selectedVideoSize.height}" else "4K 16:9 ${selectedVideoSize.width}x${selectedVideoSize.height}"
             binding.btnCodecMode.text = modeLabel
 
             configureTransform(width, height)
@@ -567,14 +691,23 @@ class MainActivity : AppCompatActivity() {
     private fun startPreviewSession() {
         val device = cameraDevice ?: return
         val texture = binding.viewfinder.surfaceTexture ?: return
+        // Fijar exactamente el mismo buffer en Preview y en Grabacion para CERO CROP
         texture.setDefaultBufferSize(selectedVideoSize.width, selectedVideoSize.height)
         val previewSurface = Surface(texture)
 
+        val surfaces = mutableListOf(previewSurface)
+        if (isRawSupportedOnCurrentLens && rawImageReader != null) {
+            surfaces.add(rawImageReader!!.surface)
+        } else if (jpegImageReader != null) {
+            surfaces.add(jpegImageReader!!.surface)
+        }
+
+        // Usamos TEMPLATE_PREVIEW o TEMPLATE_RECORD con EIS desactivado para que no exista salto de encuadre
         previewRequestBuilder = device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
             addTarget(previewSurface)
         }
 
-        device.createCaptureSession(listOf(previewSurface), object : CameraCaptureSession.StateCallback() {
+        device.createCaptureSession(surfaces, object : CameraCaptureSession.StateCallback() {
             override fun onConfigured(session: CameraCaptureSession) {
                 captureSession = session
                 applyParametersToSession()
@@ -583,11 +716,18 @@ class MainActivity : AppCompatActivity() {
         }, backgroundHandler)
     }
 
+    /**
+     * Aplica parametros manuales y DESACTIVA la Estabilizacion Digital (EIS)
+     * para evitar que Android haga un crop al iniciar la grabacion en Open Gate.
+     */
     private fun applyParametersToSession() {
         val session = captureSession ?: return
         val builder = previewRequestBuilder ?: return
 
         try {
+            // CERO CROP EN OPEN GATE: Forzar apagado de estabilizacion digital de video (EIS)
+            builder.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_OFF)
+
             if (autoIsoAndShutter) {
                 builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
                 builder.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, currentEvIndex)
@@ -613,6 +753,7 @@ class MainActivity : AppCompatActivity() {
                 builder.set(CaptureRequest.COLOR_CORRECTION_GAINS, kelvinToRggb(currentKelvin))
             }
 
+            // Mantener exactamente la matriz activa completa del sensor (100% FOV en 1.0x)
             val cropW = (sensorActiveArray.width() / currentZoomRatio).toInt()
             val cropH = (sensorActiveArray.height() / currentZoomRatio).toInt()
             val cropX = (sensorActiveArray.width() - cropW) / 2
@@ -633,6 +774,141 @@ class MainActivity : AppCompatActivity() {
             session.setRepeatingRequest(builder.build(), null, backgroundHandler)
         } catch (e: Exception) {
             e.printStackTrace()
+        }
+    }
+
+    /**
+     * Captura Fotografia en formato RAW (.DNG de 16 bits sin comprimir) en la maxima resolucion del sensor.
+     */
+    private fun captureRawOrMaxPhoto() {
+        if (isRecording) {
+            Toast.makeText(this, "Detén la grabación para capturar en RAW DNG", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val device = cameraDevice ?: return
+        val session = captureSession ?: return
+
+        try {
+            val targetSurface = if (isRawSupportedOnCurrentLens && rawImageReader != null) {
+                rawImageReader!!.surface
+            } else {
+                jpegImageReader?.surface ?: return
+            }
+
+            val stillBuilder = device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
+                addTarget(targetSurface)
+                set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_OFF)
+
+                if (autoIsoAndShutter) {
+                    set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+                    set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, currentEvIndex)
+                } else {
+                    set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
+                    set(CaptureRequest.SENSOR_SENSITIVITY, currentIso)
+                    set(CaptureRequest.SENSOR_EXPOSURE_TIME, currentShutterNs)
+                }
+
+                if (currentFocusDist > 0.01f) {
+                    set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
+                    set(CaptureRequest.LENS_FOCUS_DISTANCE, currentFocusDist)
+                } else {
+                    set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+                }
+
+                if (!autoWb) {
+                    set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_OFF)
+                    set(CaptureRequest.COLOR_CORRECTION_MODE, CaptureRequest.COLOR_CORRECTION_MODE_TRANSFORM_MATRIX)
+                    set(CaptureRequest.COLOR_CORRECTION_GAINS, kelvinToRggb(currentKelvin))
+                }
+                set(CaptureRequest.JPEG_QUALITY, 100.toByte())
+                set(CaptureRequest.JPEG_ORIENTATION, getVideoOrientationHint())
+            }
+
+            Toast.makeText(this, if (isRawSupportedOnCurrentLens) "Capturando RAW (.DNG)..." else "Capturando Foto Max Res...", Toast.LENGTH_SHORT).show()
+
+            session.capture(stillBuilder.build(), object : CameraCaptureSession.CaptureCallback() {
+                override fun onCaptureCompleted(session: CameraCaptureSession, request: CaptureRequest, result: TotalCaptureResult) {
+                    if (isRawSupportedOnCurrentLens) {
+                        synchronized(rawLock) {
+                            pendingRawResult = result
+                            tryWriteDngToGallery()
+                        }
+                    }
+                }
+            }, backgroundHandler)
+
+        } catch (e: Exception) {
+            Toast.makeText(this, "Error en captura RAW: ${e.message}", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun tryWriteDngToGallery() {
+        val result = pendingRawResult ?: return
+        val image = pendingRawImage ?: return
+        val chars = currentCharacteristics ?: return
+
+        pendingRawResult = null
+        pendingRawImage = null
+
+        try {
+            val fileName = "CINEPRO_RAW_${image.width}x${image.height}_${System.currentTimeMillis()}.dng"
+            val values = ContentValues().apply {
+                put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
+                put(MediaStore.Images.Media.MIME_TYPE, "image/x-adobe-dng")
+                put(MediaStore.Images.Media.DATE_ADDED, System.currentTimeMillis() / 1000)
+                put(MediaStore.Images.Media.DATE_TAKEN, System.currentTimeMillis())
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_DCIM + "/Camera")
+                }
+            }
+
+            val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+            if (uri != null) {
+                contentResolver.openOutputStream(uri)?.use { outStream ->
+                    val dngCreator = DngCreator(chars, result)
+                    dngCreator.writeImage(outStream, image)
+                    dngCreator.close()
+                }
+                lastSavedMediaUri = uri
+                sendBroadcast(Intent(Intent.ACTION_MEDIA_SCANNER_SCAN_FILE, uri))
+                runOnUiThread {
+                    Toast.makeText(this, "RAW DNG (${image.width}x${image.height}) guardado en Galería", Toast.LENGTH_LONG).show()
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        } finally {
+            image.close()
+        }
+    }
+
+    private fun saveJpegToGallery(image: Image) {
+        try {
+            val buffer = image.planes[0].buffer
+            val bytes = ByteArray(buffer.remaining())
+            buffer.get(bytes)
+            val fileName = "CINEPRO_MAX_${image.width}x${image.height}_${System.currentTimeMillis()}.jpg"
+            val values = ContentValues().apply {
+                put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
+                put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                put(MediaStore.Images.Media.DATE_ADDED, System.currentTimeMillis() / 1000)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_DCIM + "/Camera")
+                }
+            }
+            val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+            if (uri != null) {
+                contentResolver.openOutputStream(uri)?.use { it.write(bytes) }
+                lastSavedMediaUri = uri
+                sendBroadcast(Intent(Intent.ACTION_MEDIA_SCANNER_SCAN_FILE, uri))
+                runOnUiThread {
+                    Toast.makeText(this, "Foto (${image.width}x${image.height}) guardada en Galería", Toast.LENGTH_LONG).show()
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        } finally {
+            image.close()
         }
     }
 
@@ -674,7 +950,7 @@ class MainActivity : AppCompatActivity() {
                 setVideoSource(MediaRecorder.VideoSource.SURFACE)
                 setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
                 setOutputFile(pfd.fileDescriptor)
-                setVideoEncodingBitRate(85_000_000)
+                setVideoEncodingBitRate(95_000_000)
                 setVideoFrameRate(selectedFps)
                 setVideoSize(selectedVideoSize.width, selectedVideoSize.height)
                 setVideoEncoder(MediaRecorder.VideoEncoder.HEVC)
@@ -686,6 +962,7 @@ class MainActivity : AppCompatActivity() {
             }
 
             val texture = binding.viewfinder.surfaceTexture!!
+            // Mantener exactamente el mismo buffer size que en Preview para CERO CROP
             texture.setDefaultBufferSize(selectedVideoSize.width, selectedVideoSize.height)
             val previewSurface = Surface(texture)
             val recorderSurface = mediaRecorder!!.surface
@@ -727,8 +1004,7 @@ class MainActivity : AppCompatActivity() {
             currentParcelFd?.close()
             currentParcelFd = null
 
-            // Publicar inmediatamente el video en la Galeria de Fotos principal (DCIM/Camera)
-            currentVideoUri?.let { uri ->
+            lastSavedMediaUri?.let { uri ->
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     val values = ContentValues().apply {
                         put(MediaStore.Video.Media.IS_PENDING, 0)
@@ -740,16 +1016,13 @@ class MainActivity : AppCompatActivity() {
 
             binding.btnRecord.text = "REC"
             binding.txtTimecode.setTextColor(0xFFFFFFFF.toInt())
-            Toast.makeText(this, "Guardado en tu Galería de Fotos (DCIM/Camera)", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Video guardado en Galería (DCIM/Camera)", Toast.LENGTH_LONG).show()
             startPreviewSession()
         } catch (e: Exception) {
             e.printStackTrace()
         }
     }
 
-    /**
-     * Crea el archivo directamente en DCIM/Camera (el carrete principal de la Galeria de Fotos)
-     */
     private fun createGalleryVideoFileDescriptor(): ParcelFileDescriptor? {
         val tag = if (openGateMode) "OPENGATE" else "4K"
         val profile = if (logModeEnabled) "CINELOG" else "REC709"
@@ -765,13 +1038,13 @@ class MainActivity : AppCompatActivity() {
             }
         }
         val uri = contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values) ?: return null
-        currentVideoUri = uri
+        lastSavedMediaUri = uri
         return contentResolver.openFileDescriptor(uri, "w")
     }
 
     /**
-     * Corrige la rotacion de la vista previa para que siempre se vea horizontal (Landscape)
-     * y se adecue automaticamente cuando giras el telefono hacia la izquierda o derecha.
+     * Escala la imagen de forma proporcional (FIT CENTER) para mostrar el 100% del sensor
+     * sin recortar bordes ni al previsualizar ni al grabar en Open Gate, y ajusta el Grid de Tercios.
      */
     private fun configureTransform(viewWidth: Int, viewHeight: Int) {
         if (viewWidth == 0 || viewHeight == 0) return
@@ -792,18 +1065,26 @@ class MainActivity : AppCompatActivity() {
             bufferRect.offset(centerX - bufferRect.centerX(), centerY - bufferRect.centerY())
             matrix.setRectToRect(viewRect, bufferRect, Matrix.ScaleToFit.FILL)
 
-            val scaleY = viewHeight.toFloat() / selectedVideoSize.height.toFloat()
-            val scaleX = if (openGateMode) {
-                // En Open Gate 4:3 mostramos todo el alto del sensor centrado sin estirar
-                val targetWidth = viewHeight.toFloat() * (selectedVideoSize.width.toFloat() / selectedVideoSize.height.toFloat())
-                targetWidth / selectedVideoSize.width.toFloat()
-            } else {
-                maxOf(scaleY, viewWidth.toFloat() / selectedVideoSize.width.toFloat())
-            }
+            // Escala FIT exacta para ver todo el alto y ancho del sensor sin ningun crop
+            val scale = minOf(
+                viewHeight.toFloat() / selectedVideoSize.height.toFloat(),
+                viewWidth.toFloat() / selectedVideoSize.width.toFloat()
+            )
 
-            matrix.postScale(scaleY, scaleX, centerX, centerY)
+            matrix.postScale(scale, scale, centerX, centerY)
             val rotateDegrees = 90f * (rotation - 2)
             matrix.postRotate(rotateDegrees, centerX, centerY)
+
+            // Informar al Grid de Tercios y al Focus Peaking el area exacta del fotograma
+            val drawnW = selectedVideoSize.width * scale
+            val drawnH = selectedVideoSize.height * scale
+            binding.cineOverlays.activeImageRect.set(
+                centerX - drawnW / 2f,
+                centerY - drawnH / 2f,
+                centerX + drawnW / 2f,
+                centerY + drawnH / 2f
+            )
+            binding.cineOverlays.invalidate()
         }
         binding.viewfinder.setTransform(matrix)
     }
@@ -874,6 +1155,8 @@ class MainActivity : AppCompatActivity() {
         if (isRecording) stopRecordingVideo()
         captureSession?.close()
         cameraDevice?.close()
+        rawImageReader?.close()
+        jpegImageReader?.close()
         backgroundThread?.quitSafely()
         backgroundThread = null
         backgroundHandler = null
